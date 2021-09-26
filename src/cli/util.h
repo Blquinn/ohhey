@@ -1,8 +1,8 @@
 #pragma once
 
 #include "chrono"
-#include "string"
 #include "iostream"
+#include "string"
 #include "vector"
 
 namespace Util {
@@ -13,8 +13,9 @@ namespace Util {
 class Timer {
 
 private:
-
-typedef std::chrono::time_point<std::chrono::system_clock, std::chrono::duration<long, std::ratio<1, 1000000000>>> time_point;
+    typedef std::chrono::time_point<std::chrono::system_clock,
+                                    std::chrono::duration<long, std::ratio<1, 1000000000>>>
+        time_point;
 
     struct Mark {
         std::string name;
@@ -23,9 +24,7 @@ typedef std::chrono::time_point<std::chrono::system_clock, std::chrono::duration
     };
 
 public:
-    Timer(const std::string &timerName) 
-        : points()
-        , name() {
+    Timer(const std::string &timerName) : points(), name() {
         if (timerName.empty()) {
             name = "-";
         } else {
@@ -33,24 +32,21 @@ public:
         }
 
         // Automatically mark start time.
-        markTime("start");
+        mark("start");
     }
 
-    Timer() : Timer("") {
-    }
+    Timer() : Timer("") {}
 
     ~Timer() {
         std::cerr << "Printing timing data." << std::endl;
-        markTime("end");
+        mark("end");
         printTimings();
     }
 
-    void markTime(const std::string &pointName, bool compBeginning = false) {
-        Mark m { 
-            .name = pointName, 
-            .time = std::chrono::high_resolution_clock::now(), 
-            .compBeginning = compBeginning 
-        };
+    void mark(const std::string &pointName, bool compBeginning = false) {
+        Mark m{.name = pointName,
+               .time = std::chrono::high_resolution_clock::now(),
+               .compBeginning = compBeginning};
         points.push_back(m);
     }
 
@@ -68,10 +64,12 @@ private:
 
             Mark toCompare = curr.compBeginning ? points[0] : prev;
 
-            std::clog << "TIMING(" << name << "): (" << toCompare.name<< " -> " << curr.name 
-            << ") took " 
-            << std::chrono::duration_cast<std::chrono::milliseconds>(curr.time - toCompare.time).count()
-            << "ms" << std::endl;
+            std::clog << "TIMING(" << name << "): (" << toCompare.name << " -> " << curr.name
+                      << ") took "
+                      << std::chrono::duration_cast<std::chrono::milliseconds>(curr.time -
+                                                                               toCompare.time)
+                             .count()
+                      << "ms" << std::endl;
 
             prev = curr;
         }
@@ -81,4 +79,4 @@ private:
     std::string name;
 };
 
-}
+} // namespace Util
