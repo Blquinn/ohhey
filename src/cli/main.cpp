@@ -3,7 +3,7 @@
 #include <exception>
 
 #include "cli.h"
-#include "compare.h"
+#include "src/lib/compare.h"
 
 static std::string HELP_MESSAGE = R"(
 ohhey is a program to use facial recognition to authorize things in linux.

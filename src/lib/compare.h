@@ -30,8 +30,10 @@
 
 #include "src/lib/webcam-v4l2/webcam.h"
 
-#include "cli.h"
-#include "util.h"
+#include "src/lib/defer.h"
+
+#include "src/cli/cli.h"
+#include "src/lib/util.h"
 
 static std::string facesDir = "/home/ben/Code/cpp/dlib/examples/faces";
 
@@ -141,8 +143,16 @@ inline void copyFrameIntoArray2d(dlib::array2d<unsigned char> &array, unsigned c
     }
 }
 
+// TODO: I don't think access to m_frame.data is actually thread safe.
+// data can probably be written while it's being read.
 struct Frame {
 public:
+    ~Frame() {
+        if (m_hasAllocated) {
+            delete[] m_frame.data;
+        }
+    }
+
     void setFrame(const RGBImage f) {
         std::lock_guard<std::mutex> _lock(m_mu);
 
@@ -150,6 +160,7 @@ public:
         m_frame.width = f.width;
         m_frame.size = f.size;
 
+        // We assume every frame will be the same size.
         // Lazily allocate the frame buffer.
         if (!m_hasAllocated) {
             m_frame.data = (unsigned char *)std::malloc(sizeof(unsigned char) * f.size);
@@ -163,138 +174,135 @@ public:
         std::lock_guard<std::mutex> _lock(m_mu);
         return m_frame;
     }
+
 private:
     RGBImage m_frame;
     std::mutex m_mu;
     bool m_hasAllocated = false;
 };
 
-inline void run(std::vector<std::string> argVec) {
-    CliArgs args(argVec);
+enum class Result { AUTH_SUCCESS, AUTH_FAIULRE, ERROR };
 
-    std::clog << "Running compare of " << args.userImage << " vs camera image" << std::endl;
+inline Result run(std::vector<std::string> argVec) {
+    try {
 
-    // Config cnf;
+        CliArgs args(argVec);
 
-    Util::Timer timer("compare");
+        std::clog << "Running compare of " << args.userImage << " vs camera image" << std::endl;
 
-    auto dlibDataPath = std::filesystem::current_path().parent_path().append("dlib-data");
+        // Config cnf;
 
-    auto shapePredictorModelPath = dlibDataPath;
-    shapePredictorModelPath.append("shape_predictor_5_face_landmarks.dat");
+        Util::Timer timer("compare");
 
-    dlib::shape_predictor sp;
-    dlib::deserialize(shapePredictorModelPath) >> sp;
+        auto dlibDataPath = std::filesystem::current_path().parent_path().append("dlib-data");
 
-    timer.mark("load shape predictor");
+        auto shapePredictorModelPath = dlibDataPath;
+        shapePredictorModelPath.append("shape_predictor_5_face_landmarks.dat");
 
-    dlib::frontal_face_detector frontalFaceDet = dlib::get_frontal_face_detector();
+        dlib::shape_predictor sp;
+        dlib::deserialize(shapePredictorModelPath) >> sp;
 
-    timer.mark("load ffd");
+        timer.mark("load shape predictor");
 
-    anet_type net;
-    dlib::deserialize(dlibDataPath.append("dlib_face_recognition_resnet_model_v1.dat")) >> net;
+        dlib::frontal_face_detector frontalFaceDet = dlib::get_frontal_face_detector();
 
-    timer.mark("load resnet model");
+        timer.mark("load ffd");
 
-    dlib::array2d<unsigned char> userImage;
-    dlib::load_image(userImage, args.userImage);
-    auto userFaceDescriptors = getFaceDescriptorsFromImage(net, sp, frontalFaceDet, userImage);
+        anet_type net;
+        dlib::deserialize(dlibDataPath.append("dlib_face_recognition_resnet_model_v1.dat")) >> net;
 
-    dlib::image_window userImageWin(userImage);
-    userImageWin.set_title("User image.");
+        timer.mark("load resnet model");
 
-    timer.mark("get user face descriptors.");
+        dlib::array2d<unsigned char> userImage;
+        dlib::load_image(userImage, args.userImage);
+        auto userFaceDescriptors = getFaceDescriptorsFromImage(net, sp, frontalFaceDet, userImage);
 
-    if (userFaceDescriptors.size() != 1) {
-        std::cerr << "Expected only 1 face descriptor for user image, got "
-                  << userFaceDescriptors.size() << std::endl;
-        return;
-    }
+        dlib::image_window userImageWin(userImage);
+        userImageWin.set_title("User image.");
 
-    auto userFaceDescriptor = userFaceDescriptors[0];
+        timer.mark("get user face descriptors.");
 
-    // TODO: Figure out how to get higher res images.
-    const int xres = 640;
-    const int yres = 480;
+        if (userFaceDescriptors.size() != 1) {
+            std::cerr << "Expected only 1 face descriptor for user image, got "
+                      << userFaceDescriptors.size() << std::endl;
+            return Result::ERROR;
+        }
 
-    Frame frame;
-    std::condition_variable cv;
-    std::mutex mu;
-    std::atomic<bool> captureThreadDie(false);
+        auto userFaceDescriptor = userFaceDescriptors[0];
 
-    std::thread captureThread([&]() {
-        Webcam webcam("/dev/video0", xres, yres);
+        // TODO: Figure out how to get higher res images.
+        const int xres = 640;
+        const int yres = 480;
 
-        int numFrames = 0;
-        while (!captureThreadDie.load()) {
-            auto f = webcam.frame();
+        Frame frame;
+        std::condition_variable cv;
+        std::mutex mu;
+        std::atomic<bool> captureThreadDie(false);
 
-            if (numFrames == 0) {
+        std::thread captureThread([&]() {
+            Webcam webcam("/dev/video0", xres, yres);
+
+            while (!captureThreadDie.load()) {
+                frame.setFrame(webcam.frame());
                 cv.notify_one();
             }
+        });
 
-            numFrames++;
+        defer({
+            // Kill video capture thread.
+            captureThreadDie.store(true);
+            captureThread.join();
+        });
 
-            frame.setFrame(f);
+        { // Wait for webcam to capture one frame.
+            std::unique_lock<std::mutex> lk(mu);
+            cv.wait_for(lk, std::chrono::seconds(5));
         }
-    });
 
-    { // Wait for webcam to capture one frame.
-        std::unique_lock<std::mutex> lk(mu);
-        cv.wait_for(lk, std::chrono::seconds(5));
-    }
+        dlib::array2d<unsigned char> cameraImage(yres, xres);
 
-    dlib::array2d<unsigned char> cameraImage(yres, xres);
+        dlib::image_window cameraImageWin(cameraImage);
+        cameraImageWin.set_title("Camera image.");
 
-    dlib::image_window cameraImageWin(cameraImage);
-    cameraImageWin.set_title("Camera image.");
+        const auto deadline = std::chrono::system_clock::now() +
+                              std::chrono::seconds(10); // TODO: Make configurable timeout.
 
-    const auto deadline = std::chrono::system_clock::now() +
-                          std::chrono::seconds(10); // TODO: Make configurable timeout.
+        bool passedDeadline = false;
+        while ((passedDeadline = std::chrono::system_clock::now() > deadline) == false) {
+            // This iterates through every frame captured by the camera.
+            // How to make it so we just grab the current frame being captured?
+            copyFrameIntoArray2d(cameraImage, frame.frame().data);
 
-    bool passedDeadline = false;
-    bool foundFace = false;
-    while ((passedDeadline = std::chrono::system_clock::now() > deadline) == false) {
-        // This iterates through every frame captured by the camera.
-        // How to make it so we just grab the current frame being captured?
-        copyFrameIntoArray2d(cameraImage, frame.frame().data);
+            cameraImageWin.set_image(cameraImage);
 
-        cameraImageWin.set_image(cameraImage);
+            auto cameraFaceDescriptors =
+                getFaceDescriptorsFromImage(net, sp, frontalFaceDet, cameraImage);
 
-        auto cameraFaceDescriptors =
-            getFaceDescriptorsFromImage(net, sp, frontalFaceDet, cameraImage);
+            timer.mark("get camera face descriptors.");
 
-        timer.mark("get camera face descriptors.");
+            std::clog << "Found " << cameraFaceDescriptors.size() << " faces in camera image."
+                      << std::endl;
 
-        std::clog << "Found " << cameraFaceDescriptors.size() << " faces in camera image."
-                  << std::endl;
-
-        // We can check to see if any face on the camera is similar to the users face.
-        for (auto &&cfd : cameraFaceDescriptors) {
-            if (length(userFaceDescriptor - cfd) < 0.6) {
-                foundFace = true;
-                break;
+            // We can check to see if any face on the camera is similar to the users face.
+            for (auto &&cfd : cameraFaceDescriptors) {
+                if (length(userFaceDescriptor - cfd) < 0.6) {
+                    std::clog << "Found matching face in camera image." << std::endl;
+                    return Result::AUTH_SUCCESS;
+                }
             }
+
+            std::clog << "Failed to find matching face in camera image." << std::endl;
         }
 
-        if (foundFace)
-            break;
+        if (passedDeadline) {
+            std::clog << "Surpassed deadline while trying to detect matching face." << std::endl;
+        }
 
-        std::clog << "Failed to find matching face in camera image." << std::endl;
+        return Result::ERROR;
+    } catch (std::exception &e) {
+        std::clog << "Exception occurred during facial recognition: " << e.what() << std::endl;
+        return Result::ERROR;
     }
-
-    if (passedDeadline) {
-        std::clog << "Surpassed deadline while trying to detect matching face." << std::endl;
-    }
-
-    if (foundFace) {
-        std::clog << "Found matching face in camera image." << std::endl;
-    }
-
-    // Kill video capture thread.(Use RAII for this.)
-    captureThreadDie.store(true);
-    captureThread.join();
 }
 
 } // namespace Compare
