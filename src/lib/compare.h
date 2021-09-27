@@ -19,7 +19,10 @@
 #include <sstream>
 #include <stdexcept>
 #include <sys/ioctl.h>
+#include <tclap/SwitchArg.h>
+#include <tclap/ValueArg.h>
 #include <thread>
+#include <type_traits>
 #include <vector>
 
 #include "tclap/CmdLine.h"
@@ -53,14 +56,20 @@ struct CliArgs {
             "userImage", "The image with the stored face.", true, "", "userImage");
         cmd.add(userImageArg);
 
+        TCLAP::SwitchArg showImageWindowArg("S", "show-image-window",
+                                            "Show a debug window for the camera image.", false);
+        cmd.add(showImageWindowArg);
+
         cmd.parse(argVec);
 
         // user = userArg.getValue();
         userImage = userImageArg.getValue();
+        showImageWindow = showImageWindowArg.getValue();
     }
 
     // std::string user;
     std::string userImage;
+    bool showImageWindow;
 };
 
 // struct Config {
@@ -143,42 +152,39 @@ inline void copyFrameIntoArray2d(dlib::array2d<unsigned char> &array, unsigned c
     }
 }
 
-// TODO: I don't think access to m_frame.data is actually thread safe.
-// data can probably be written while it's being read.
+struct Image {
+    std::vector<unsigned char> data; // RGB888 <=> RGB24
+    size_t width;
+    size_t height;
+    size_t size; // width * height * 3
+
+    Image(const RGBImage &img) {
+        // Copy image data into a vector.
+        data = std::vector<unsigned char>(img.data, img.data + img.size);
+        width = img.width;
+        height = img.height;
+        size = img.size;
+    }
+};
+
 struct Frame {
 public:
-    ~Frame() {
-        if (m_hasAllocated) {
-            delete[] m_frame.data;
-        }
-    }
-
     void setFrame(const RGBImage f) {
         std::lock_guard<std::mutex> _lock(m_mu);
 
-        m_frame.height = f.height;
-        m_frame.width = f.width;
-        m_frame.size = f.size;
-
-        // We assume every frame will be the same size.
-        // Lazily allocate the frame buffer.
-        if (!m_hasAllocated) {
-            m_frame.data = (unsigned char *)std::malloc(sizeof(unsigned char) * f.size);
-            m_hasAllocated = true;
-        }
-
-        std::memcpy(m_frame.data, f.data, f.size);
+        // Copy frame data.
+        m_frame = std::make_shared<Image>(f);
     }
 
-    RGBImage frame() {
+    std::shared_ptr<Image> frame() {
         std::lock_guard<std::mutex> _lock(m_mu);
+
         return m_frame;
     }
 
 private:
-    RGBImage m_frame;
+    std::shared_ptr<Image> m_frame;
     std::mutex m_mu;
-    bool m_hasAllocated = false;
 };
 
 enum class Result { AUTH_SUCCESS, AUTH_FAIULRE, ERROR };
@@ -217,8 +223,8 @@ inline Result run(std::vector<std::string> argVec) {
         dlib::load_image(userImage, args.userImage);
         auto userFaceDescriptors = getFaceDescriptorsFromImage(net, sp, frontalFaceDet, userImage);
 
-        dlib::image_window userImageWin(userImage);
-        userImageWin.set_title("User image.");
+        // dlib::image_window userImageWin(userImage);
+        // userImageWin.set_title("User image.");
 
         timer.mark("get user face descriptors.");
 
@@ -239,8 +245,13 @@ inline Result run(std::vector<std::string> argVec) {
         std::mutex mu;
         std::atomic<bool> captureThreadDie(false);
 
+        // We need to continuously read frames from v4l2, otherwise it will receive
+        // frames in order that they were captured. We always want to take the most recent
+        // frame, so that the slowness of the recognition doesn't create a backlog of frames.
+        // TODO: Optimize frame rate request.
         std::thread captureThread([&]() {
             Webcam webcam("/dev/video0", xres, yres);
+            // Webcam webcam("/dev/video2", xres, yres);
 
             while (!captureThreadDie.load()) {
                 frame.setFrame(webcam.frame());
@@ -261,19 +272,26 @@ inline Result run(std::vector<std::string> argVec) {
 
         dlib::array2d<unsigned char> cameraImage(yres, xres);
 
-        dlib::image_window cameraImageWin(cameraImage);
-        cameraImageWin.set_title("Camera image.");
+        std::unique_ptr<dlib::image_window> cameraImageWin;
+
+        if (args.showImageWindow) {
+            cameraImageWin = std::make_unique<dlib::image_window>(cameraImage);
+            cameraImageWin->set_title("Camera image.");
+        }
 
         const auto deadline = std::chrono::system_clock::now() +
                               std::chrono::seconds(10); // TODO: Make configurable timeout.
 
+        std::shared_ptr<Image> currentFrame;
         bool passedDeadline = false;
-        while ((passedDeadline = std::chrono::system_clock::now() > deadline) == false) {
+        while (!(passedDeadline = std::chrono::system_clock::now() > deadline)) {
             // This iterates through every frame captured by the camera.
             // How to make it so we just grab the current frame being captured?
-            copyFrameIntoArray2d(cameraImage, frame.frame().data);
+            currentFrame = frame.frame();
+            copyFrameIntoArray2d(cameraImage, currentFrame->data.data());
 
-            cameraImageWin.set_image(cameraImage);
+            if (args.showImageWindow)
+                cameraImageWin->set_image(cameraImage);
 
             auto cameraFaceDescriptors =
                 getFaceDescriptorsFromImage(net, sp, frontalFaceDet, cameraImage);
@@ -285,6 +303,10 @@ inline Result run(std::vector<std::string> argVec) {
 
             // We can check to see if any face on the camera is similar to the users face.
             for (auto &&cfd : cameraFaceDescriptors) {
+                // Explanation for 0.6 is found here:
+                // http://dlib.net/dnn_face_recognition_ex.cpp.html
+                // TODO: Experiment with other values?
+                // TODO: Make configurable.
                 if (length(userFaceDescriptor - cfd) < 0.6) {
                     std::clog << "Found matching face in camera image." << std::endl;
                     return Result::AUTH_SUCCESS;

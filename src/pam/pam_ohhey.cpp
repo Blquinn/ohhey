@@ -9,6 +9,8 @@
 
 #include "src/lib/compare.h"
 
+// Note: We can store global state here that should persist through the user's session.
+
 extern "C" {
 /* expected hook */
 PAM_EXTERN int pam_sm_setcred(pam_handle_t *pamh, int flags, int argc, const char *argv[]) {
@@ -38,6 +40,7 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
         return PAM_SUCCESS;
     case Compare::Result::AUTH_FAIULRE:    
     case Compare::Result::ERROR:    
+    default:
         return PAM_AUTH_ERR;
     }
 }

@@ -28,7 +28,7 @@ pam_lib_files = common_files + [
 ]
 
 library('pam_ohhey', pam_lib_files, version : '0.0.1', soversion : '0',
-  dependencies: cli_deps, link_args: pam_link_flags)
+  dependencies: cli_deps, link_args: pam_link_flags, cpp_args: cpp_args)
 
 pam_ohhey_test_files = common_files + [
   'src/pam/pam_ohhey.cpp',
