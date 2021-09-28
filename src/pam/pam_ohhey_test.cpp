@@ -8,44 +8,42 @@ const struct pam_conv conv = {
 	NULL
 };
 
-int main(int argc, char *argv[]) {
-	pam_handle_t* pamh = NULL;
-	int retval;
-	const char* user = "nobody";
-
-	if(argc != 2) {
-		printf("Usage: app [username]\n");
-		exit(1);
-	}
-
-	user = argv[1];
-
-	retval = pam_start("check_user", user, &conv, &pamh);
-
-	// Are the credentials correct?
-	if (retval == PAM_SUCCESS) {
-		printf("Credentials accepted.\n");
-		retval = pam_authenticate(pamh, 0);
-	}
-
-	// Can the accound be used at this time?
-	if (retval == PAM_SUCCESS) {
-		printf("Account is valid.\n");
-		retval = pam_acct_mgmt(pamh, 0);
-	}
-
-	// Did everything work?
-	if (retval == PAM_SUCCESS) {
-		printf("Authenticated\n");
-	} else {
-		printf("Not Authenticated\n");
-	}
-
-	// close PAM (end session)
+void end_and_exit(pam_handle_t* pamh, int retval){
 	if (pam_end(pamh, retval) != PAM_SUCCESS) {
 		pamh = NULL;
 		printf("check_user: failed to release authenticator\n");
 		exit(1);
+	}
+
+	exit(0);
+}
+
+int main(int argc, char *argv[]) {
+	if(argc != 2) {
+		printf("Usage: app [username]\n");
+		return 1;
+	}
+
+	const auto user = argv[1];
+
+	int retval;
+	pam_handle_t* pamh = NULL;
+	if ((retval = pam_start("check_user", user, &conv, &pamh)) == PAM_SUCCESS) {
+		printf("Began check_user.\n");
+	} else {
+		end_and_exit(pamh, retval);
+	}
+
+	if ((retval = pam_authenticate(pamh, 0)) == PAM_SUCCESS) {
+		printf("Authenticated.\n");
+	} else {
+		end_and_exit(pamh, retval);
+	}
+
+	if ((retval = pam_acct_mgmt(pamh, 0)) == PAM_SUCCESS) {
+		printf("Account is valid.\n");
+	} else {
+		end_and_exit(pamh, retval);
 	}
 
 	return retval == PAM_SUCCESS ? 0 : 1;

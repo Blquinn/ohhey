@@ -53,10 +53,6 @@ struct CliArgs {
                                                       "user");
         cmd.add(userArg);
 
-        // TCLAP::UnlabeledValueArg<std::string> userImageArg(
-        //     "userImage", "The image with the stored face.", true, "", "userImage");
-        // cmd.add(userImageArg);
-
         TCLAP::SwitchArg showImageWindowArg("S", "show-image-window",
                                             "Show a debug window for the camera image.", false);
         cmd.add(showImageWindowArg);
@@ -67,13 +63,11 @@ struct CliArgs {
         cmd.parse(argVec);
 
         user = userArg.getValue();
-        // userImage = userImageArg.getValue();
         showImageWindow = showImageWindowArg.getValue();
         printTiming = printTimingArg.getValue();
     }
 
     std::string user;
-    // std::string userImage;
     bool showImageWindow;
     bool printTiming;
 };
@@ -173,26 +167,6 @@ struct Image {
     }
 };
 
-struct Frame {
-public:
-    void setFrame(const RGBImage f) {
-        std::lock_guard<std::mutex> _lock(m_mu);
-
-        // Copy frame data.
-        m_frame = std::make_shared<Image>(f);
-    }
-
-    std::shared_ptr<Image> frame() {
-        std::lock_guard<std::mutex> _lock(m_mu);
-
-        return m_frame;
-    }
-
-private:
-    std::shared_ptr<Image> m_frame;
-    std::mutex m_mu;
-};
-
 struct DlibModels {
     anet_type net;
     dlib::shape_predictor sp;
@@ -234,21 +208,23 @@ public:
             Webcam webcam("/dev/video0", xres, yres);
 
             while (!captureThreadDie.load()) {
-                m_frame.setFrame(webcam.frame());
+                m_frame = std::make_shared<Image>(webcam.frame());
                 cv.notify_one();
             }
         });
+    }
 
+    ~CameraCaptureThread() { shutdown(); }
+
+    std::shared_ptr<Image> frame() {
         std::unique_lock<std::mutex> lk(mu);
         if (cv.wait_for(lk, std::chrono::seconds(5)) == std::cv_status::timeout) {
             shutdown();
             throw std::runtime_error("Timed out while waiting for camera frame.");
         }
+
+        return m_frame;
     }
-
-    ~CameraCaptureThread() { shutdown(); }
-
-    std::shared_ptr<Image> frame() { return m_frame.frame(); }
 
 private:
     void shutdown() {
@@ -257,7 +233,7 @@ private:
     }
 
     std::thread t;
-    Frame m_frame;
+    std::shared_ptr<Image> m_frame;
     std::condition_variable cv;
     std::mutex mu;
     std::atomic<bool> captureThreadDie;
@@ -270,13 +246,17 @@ inline Result run(std::vector<std::string> argVec) {
 
         CliArgs args(argVec);
 
-        // std::clog << "Running compare of " << args.userImage << " vs camera image" << std::endl;
-
         // Config cnf;
 
         Util::Timer timer("compare", args.printTiming);
 
-        // auto dlibDataPath = std::filesystem::current_path().parent_path().append("dlib-data");
+        const int xres = 640;
+        const int yres = 480;
+        CameraCaptureThread captureThread(xres, yres);
+
+        timer.mark("create capture thread");
+
+        // TODO: Make configurable.
         std::filesystem::path dlibDataPath("/home/ben/Code/cpp/ohhey/dlib-data");
         DlibModels models(dlibDataPath, &timer);
 
@@ -292,13 +272,6 @@ inline Result run(std::vector<std::string> argVec) {
 
         timer.mark("load user face descriptor");
 
-        const int xres = 640;
-        const int yres = 480;
-
-        CameraCaptureThread captureThread(xres, yres);
-
-        timer.mark("create capture thread");
-
         dlib::array2d<unsigned char> cameraImage(yres, xres);
 
         std::unique_ptr<dlib::image_window> cameraImageWin;
@@ -312,6 +285,7 @@ inline Result run(std::vector<std::string> argVec) {
         const auto deadline = std::chrono::system_clock::now() +
                               std::chrono::seconds(10); // TODO: Make configurable timeout.
 
+        int attempts = 1;
         bool passedDeadline = false;
         while (!(passedDeadline = std::chrono::system_clock::now() > deadline)) {
             // This iterates through every frame captured by the camera.
@@ -326,8 +300,8 @@ inline Result run(std::vector<std::string> argVec) {
 
             timer.mark("get camera face descriptors.");
 
-            std::clog << "Found " << cameraFaceDescriptors.size() << " faces in camera image."
-                      << std::endl;
+            // std::clog << "Found " << cameraFaceDescriptors.size() << " faces in camera image."
+            //           << std::endl;
 
             // We can check to see if any face on the camera is similar to the users face.
             for (auto &&cfd : cameraFaceDescriptors) {
@@ -336,16 +310,17 @@ inline Result run(std::vector<std::string> argVec) {
                 // TODO: Experiment with other values?
                 // TODO: Make configurable.
                 if (length(userFaceDescriptor - cfd) < 0.6) {
-                    std::clog << "Found matching face in camera image." << std::endl;
+                    // std::clog << "Found matching face in camera image." << std::endl;
                     return Result::AUTH_SUCCESS;
                 }
             }
 
-            std::clog << "Failed to find matching face in camera image." << std::endl;
+            attempts++;
         }
 
         if (passedDeadline) {
-            std::clog << "Surpassed deadline while trying to detect matching face." << std::endl;
+            std::clog << "Surpassed deadline while trying to detect matching face after "
+                      << attempts << " attempts." << std::endl;
         }
 
         return Result::ERROR;
