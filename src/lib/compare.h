@@ -16,6 +16,7 @@
 #include <linux/videodev2.h>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <sys/ioctl.h>
@@ -48,28 +49,33 @@ struct CliArgs {
                            "image to the stored model.",
                            ' ', "0.1");
 
-        // TCLAP::UnlabeledValueArg<std::string> userArg(
-        //     "user", "The user to compare to.", true, "", "user");
-        // cmd.add(userArg);
+        TCLAP::UnlabeledValueArg<std::string> userArg("user", "The user to compare to.", true, "",
+                                                      "user");
+        cmd.add(userArg);
 
-        TCLAP::UnlabeledValueArg<std::string> userImageArg(
-            "userImage", "The image with the stored face.", true, "", "userImage");
-        cmd.add(userImageArg);
+        // TCLAP::UnlabeledValueArg<std::string> userImageArg(
+        //     "userImage", "The image with the stored face.", true, "", "userImage");
+        // cmd.add(userImageArg);
 
         TCLAP::SwitchArg showImageWindowArg("S", "show-image-window",
                                             "Show a debug window for the camera image.", false);
         cmd.add(showImageWindowArg);
 
+        TCLAP::SwitchArg printTimingArg("T", "print-timing", "Print timing stats", false);
+        cmd.add(printTimingArg);
+
         cmd.parse(argVec);
 
-        // user = userArg.getValue();
-        userImage = userImageArg.getValue();
+        user = userArg.getValue();
+        // userImage = userImageArg.getValue();
         showImageWindow = showImageWindowArg.getValue();
+        printTiming = printTimingArg.getValue();
     }
 
-    // std::string user;
-    std::string userImage;
+    std::string user;
+    // std::string userImage;
     bool showImageWindow;
+    bool printTiming;
 };
 
 // struct Config {
@@ -132,7 +138,7 @@ getFaceDescriptorsFromImage(anet_type &net, const dlib::shape_predictor &sp,
 
     std::vector<dlib::matrix<dlib::rgb_pixel>> faces;
 
-    for (auto face : dets) {
+    for (auto &&face : dets) {
         auto shape = sp(img, face);
         dlib::matrix<dlib::rgb_pixel> faceChip;
         dlib::extract_image_chip(img, dlib::get_face_chip_details(shape, 150, 0.25), faceChip);
@@ -187,6 +193,76 @@ private:
     std::mutex m_mu;
 };
 
+struct DlibModels {
+    anet_type net;
+    dlib::shape_predictor sp;
+    dlib::frontal_face_detector frontalFaceDet;
+
+    DlibModels(std::filesystem::path basePath, Util::Timer *timer = nullptr)
+        : net(), sp(), frontalFaceDet() {
+
+        auto shapePredictorModelPath = basePath;
+        shapePredictorModelPath.append("shape_predictor_5_face_landmarks.dat");
+
+        dlib::deserialize(shapePredictorModelPath) >> sp;
+
+        if (timer)
+            timer->mark("load shape predictor");
+
+        frontalFaceDet = dlib::get_frontal_face_detector();
+
+        if (timer)
+            timer->mark("load ffd");
+
+        dlib::deserialize(basePath.append("dlib_face_recognition_resnet_model_v1.dat")) >> net;
+
+        if (timer)
+            timer->mark("load resnet model");
+    }
+
+    std::vector<dlib::matrix<float, 0, 1>>
+    getFaceDescriptorsFromImage(const dlib::array2d<unsigned char> &img) {
+        return Compare::getFaceDescriptorsFromImage(net, sp, frontalFaceDet, img);
+    }
+};
+
+struct CameraCaptureThread {
+public:
+    // TODO: Figure out how to get higher res images.
+    CameraCaptureThread(int xres, int yres) : t(), m_frame(), cv(), mu(), captureThreadDie(false) {
+        t = std::thread([&]() {
+            Webcam webcam("/dev/video0", xres, yres);
+
+            while (!captureThreadDie.load()) {
+                m_frame.setFrame(webcam.frame());
+                cv.notify_one();
+            }
+        });
+
+        std::unique_lock<std::mutex> lk(mu);
+        if (cv.wait_for(lk, std::chrono::seconds(5)) == std::cv_status::timeout) {
+            shutdown();
+            throw std::runtime_error("Timed out while waiting for camera frame.");
+        }
+    }
+
+    ~CameraCaptureThread() { shutdown(); }
+
+    std::shared_ptr<Image> frame() { return m_frame.frame(); }
+
+private:
+    void shutdown() {
+        captureThreadDie.store(true);
+        t.join();
+    }
+
+    std::thread t;
+    Frame m_frame;
+    std::condition_variable cv;
+    std::mutex mu;
+    std::atomic<bool> captureThreadDie;
+};
+
 enum class Result { AUTH_SUCCESS, AUTH_FAIULRE, ERROR };
 
 inline Result run(std::vector<std::string> argVec) {
@@ -194,81 +270,34 @@ inline Result run(std::vector<std::string> argVec) {
 
         CliArgs args(argVec);
 
-        std::clog << "Running compare of " << args.userImage << " vs camera image" << std::endl;
+        // std::clog << "Running compare of " << args.userImage << " vs camera image" << std::endl;
 
         // Config cnf;
 
-        Util::Timer timer("compare");
+        Util::Timer timer("compare", args.printTiming);
 
-        auto dlibDataPath = std::filesystem::current_path().parent_path().append("dlib-data");
+        // auto dlibDataPath = std::filesystem::current_path().parent_path().append("dlib-data");
+        std::filesystem::path dlibDataPath("/home/ben/Code/cpp/ohhey/dlib-data");
+        DlibModels models(dlibDataPath, &timer);
 
-        auto shapePredictorModelPath = dlibDataPath;
-        shapePredictorModelPath.append("shape_predictor_5_face_landmarks.dat");
+        timer.mark("load models");
 
-        dlib::shape_predictor sp;
-        dlib::deserialize(shapePredictorModelPath) >> sp;
+        std::stringstream path;
+        path << "/tmp/" << args.user << "-desc.dat";
 
-        timer.mark("load shape predictor");
+        dlib::matrix<float, 0, 1> userFaceDescriptor;
+        std::ifstream ifs;
+        ifs.open(path.str(), std::istream::in);
+        dlib::deserialize(ifs) >> userFaceDescriptor;
 
-        dlib::frontal_face_detector frontalFaceDet = dlib::get_frontal_face_detector();
+        timer.mark("load user face descriptor");
 
-        timer.mark("load ffd");
-
-        anet_type net;
-        dlib::deserialize(dlibDataPath.append("dlib_face_recognition_resnet_model_v1.dat")) >> net;
-
-        timer.mark("load resnet model");
-
-        dlib::array2d<unsigned char> userImage;
-        dlib::load_image(userImage, args.userImage);
-        auto userFaceDescriptors = getFaceDescriptorsFromImage(net, sp, frontalFaceDet, userImage);
-
-        // dlib::image_window userImageWin(userImage);
-        // userImageWin.set_title("User image.");
-
-        timer.mark("get user face descriptors.");
-
-        if (userFaceDescriptors.size() != 1) {
-            std::cerr << "Expected only 1 face descriptor for user image, got "
-                      << userFaceDescriptors.size() << std::endl;
-            return Result::ERROR;
-        }
-
-        auto userFaceDescriptor = userFaceDescriptors[0];
-
-        // TODO: Figure out how to get higher res images.
         const int xres = 640;
         const int yres = 480;
 
-        Frame frame;
-        std::condition_variable cv;
-        std::mutex mu;
-        std::atomic<bool> captureThreadDie(false);
+        CameraCaptureThread captureThread(xres, yres);
 
-        // We need to continuously read frames from v4l2, otherwise it will receive
-        // frames in order that they were captured. We always want to take the most recent
-        // frame, so that the slowness of the recognition doesn't create a backlog of frames.
-        // TODO: Optimize frame rate request.
-        std::thread captureThread([&]() {
-            Webcam webcam("/dev/video0", xres, yres);
-            // Webcam webcam("/dev/video2", xres, yres);
-
-            while (!captureThreadDie.load()) {
-                frame.setFrame(webcam.frame());
-                cv.notify_one();
-            }
-        });
-
-        defer({
-            // Kill video capture thread.
-            captureThreadDie.store(true);
-            captureThread.join();
-        });
-
-        { // Wait for webcam to capture one frame.
-            std::unique_lock<std::mutex> lk(mu);
-            cv.wait_for(lk, std::chrono::seconds(5));
-        }
+        timer.mark("create capture thread");
 
         dlib::array2d<unsigned char> cameraImage(yres, xres);
 
@@ -277,24 +306,23 @@ inline Result run(std::vector<std::string> argVec) {
         if (args.showImageWindow) {
             cameraImageWin = std::make_unique<dlib::image_window>(cameraImage);
             cameraImageWin->set_title("Camera image.");
+            timer.mark("launch camera image window");
         }
 
         const auto deadline = std::chrono::system_clock::now() +
                               std::chrono::seconds(10); // TODO: Make configurable timeout.
 
-        std::shared_ptr<Image> currentFrame;
         bool passedDeadline = false;
         while (!(passedDeadline = std::chrono::system_clock::now() > deadline)) {
             // This iterates through every frame captured by the camera.
             // How to make it so we just grab the current frame being captured?
-            currentFrame = frame.frame();
+            auto currentFrame = captureThread.frame();
             copyFrameIntoArray2d(cameraImage, currentFrame->data.data());
 
             if (args.showImageWindow)
                 cameraImageWin->set_image(cameraImage);
 
-            auto cameraFaceDescriptors =
-                getFaceDescriptorsFromImage(net, sp, frontalFaceDet, cameraImage);
+            auto cameraFaceDescriptors = models.getFaceDescriptorsFromImage(cameraImage);
 
             timer.mark("get camera face descriptors.");
 

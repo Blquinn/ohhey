@@ -24,7 +24,8 @@ private:
     };
 
 public:
-    Timer(const std::string &timerName) : points(), name() {
+    Timer(const std::string &timerName, bool shouldPrint)
+        : points(), name(), m_shouldPrint(shouldPrint) {
         if (timerName.empty()) {
             name = "-";
         } else {
@@ -35,10 +36,9 @@ public:
         mark("start");
     }
 
-    Timer() : Timer("") {}
+    Timer(bool shouldPrint) : Timer("", shouldPrint) {}
 
     ~Timer() {
-        std::cerr << "Printing timing data." << std::endl;
         mark("end");
         printTimings();
     }
@@ -52,6 +52,8 @@ public:
 
 private:
     void printTimings() {
+        if (!m_shouldPrint) return;
+
         if (points.size() < 2) {
             std::clog << "Not enough timing points to print stats" << std::endl;
             return;
@@ -77,6 +79,7 @@ private:
 
     std::vector<Mark> points;
     std::string name;
+    bool m_shouldPrint;
 };
 
 } // namespace Util

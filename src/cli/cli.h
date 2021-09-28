@@ -10,6 +10,7 @@
 namespace Cli {
 
 static std::string CMD_COMPARE = "compare";
+static std::string CMD_ADD = "add";
 
 typedef std::function<void(std::vector<std::string> &)> BaseCommand;
 

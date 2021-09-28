@@ -3,6 +3,7 @@
 #include <exception>
 
 #include "cli.h"
+#include "add.h"
 #include "src/lib/compare.h"
 
 static std::string HELP_MESSAGE = R"(
@@ -10,7 +11,7 @@ ohhey is a program to use facial recognition to authorize things in linux.
 
 A subcommand must be supplied.
 
-Available subcommands are (compare).
+Available subcommands are (compare, add).
 )";
 
 void printHelp() { std::cerr << HELP_MESSAGE; }
@@ -25,9 +26,12 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
+    std::string subCommand = argVec[0];
     Cli::BaseCommand cmd;
-    if (argVec[0] == Cli::CMD_COMPARE) {
+    if (subCommand == Cli::CMD_COMPARE) {
         cmd = Compare::run;
+    } else if (subCommand == Cli::CMD_ADD) {
+        cmd = Add::run;
     } else {
         std::cerr << "Received unknown subcommand \"" << argVec[0] << "\"." << std::endl;
         printHelp();

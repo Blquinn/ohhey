@@ -1,3 +1,4 @@
+#include <iostream>
 #include <ostream>
 #include <security/pam_appl.h>
 #include <security/pam_modules.h>
@@ -5,84 +6,76 @@
 #include <stdlib.h>
 #include <string.h>
 #include <vector>
-#include <iostream>
 
 #include "src/lib/compare.h"
 
 // Note: We can store global state here that should persist through the user's session.
 
-extern "C" {
-/* expected hook */
-PAM_EXTERN int pam_sm_setcred(pam_handle_t *pamh, int flags, int argc, const char *argv[]) {
-    std::clog << "Setting credentials" << std::endl;
-    return PAM_SUCCESS;
-}
+int auth(std::string username) {
+    // std::clog << "Authenticating " << username << std::endl;
 
-PAM_EXTERN int pam_sm_acct_mgmt(pam_handle_t *pamh, int flags, int argc, const char *argv[]) {
-    std::clog << "Account mgmt" << std::endl;
-    return PAM_SUCCESS;
-}
-
-/* expected hook, this is where custom stuff happens */
-PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, const char *argv[]) {
-    int retval;
-    const char *pUsername;
-    retval = pam_get_user(pamh, &pUsername, "Username: ");
-
-    // printf("Authenticating %s\n", pUsername);
-    std::clog << "Authenticating " << pUsername << std::endl;
-
-    auto image = "/home/ben/Pictures/my-face.jpg";
-
-    auto result = Compare::run(std::vector<std::string>{"", image});
+    auto result = Compare::run(std::vector<std::string>{"", username});
     switch (result) {
-    case Compare::Result::AUTH_SUCCESS:    
+    case Compare::Result::AUTH_SUCCESS:
         return PAM_SUCCESS;
-    case Compare::Result::AUTH_FAIULRE:    
-    case Compare::Result::ERROR:    
+    case Compare::Result::AUTH_FAIULRE:
+    case Compare::Result::ERROR:
     default:
         return PAM_AUTH_ERR;
     }
 }
 
-// PAM_EXTERN int pam_sm_authenticate(pam_handle_t *handle, int flags, int argc, const char **argv){
-//     /* In this function we will ask the username and the password with pam_get_user()
-//      * and pam_get_authtok(). We will then decide if the user is authenticated */
-// }
+int getUserAndAuth(pam_handle_t *pamh, int flags, int argc, const char *argv[]) {
+    int retval;
+    const char *pUsername;
+    retval = pam_get_user(pamh, &pUsername, "Username: ");
+    if (retval != PAM_SUCCESS)
+        return retval;
 
-// PAM_EXTERN int pam_sm_acct_mgmt(pam_handle_t *pamh, int flags, int argc, const char **argv) {
-//     /* In this function we check that the user is allowed in the system. We already know
-//      * that he's authenticated, but we could apply restrictions based on time of the day,
-//      * resources in the system etc. */
-// }
+    return auth(pUsername);
+}
 
-// PAM_EXTERN int pam_sm_setcred(pam_handle_t *pamh, int flags, int argc, const char **argv) {
-//     /* We could have many more information of the user other then password and username.
-//      * These are the credentials. For example, a kerberos ticket. Here we establish those
-//      * and make them visible to the application */
-// }
+/* Begin hooks */
 
-PAM_EXTERN int pam_sm_open_session(pam_handle_t *pamh, int flags, int argc, const char **argv) {
+extern "C" {
+/* expected hook, this is where custom stuff happens */
+PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, const char *argv[]) {
+    // std::clog << "Running ohhey auth." << std::endl;
+
+    return getUserAndAuth(pamh, flags, argc, argv);
+}
+
+PAM_EXTERN int pam_sm_open_session(pam_handle_t *pamh, int flags, int argc, const char *argv[]) {
     /* When the application wants to open a session, this function is called. Here we should
      * build the user environment (setting environment variables, mounting directories etc) */
-    std::clog << "Open session" << std::endl;
+    // std::clog << "Open session" << std::endl;
 
+    return getUserAndAuth(pamh, flags, argc, argv);
+}
+
+/* expected hook */
+PAM_EXTERN int pam_sm_setcred(pam_handle_t *pamh, int flags, int argc, const char *argv[]) {
+    // std::clog << "Setting credentials" << std::endl;
     return PAM_SUCCESS;
 }
 
-PAM_EXTERN int pam_sm_close_session(pam_handle_t *pamh, int flags, int argc, const char **argv) {
+PAM_EXTERN int pam_sm_acct_mgmt(pam_handle_t *pamh, int flags, int argc, const char *argv[]) {
+    // std::clog << "Account mgmt" << std::endl;
+    return PAM_SUCCESS;
+}
+
+PAM_EXTERN int pam_sm_close_session(pam_handle_t *pamh, int flags, int argc, const char *argv[]) {
     /* Here we destroy the environment we have created above */
-    std::clog << "Close session" << std::endl;
+    // std::clog << "Close session" << std::endl;
 
     return PAM_SUCCESS;
 }
 
-PAM_EXTERN int pam_sm_chauthtok(pam_handle_t *pamh, int flags, int argc, const char **argv){
+PAM_EXTERN int pam_sm_chauthtok(pam_handle_t *pamh, int flags, int argc, const char *argv[]) {
     /* This function is called to change the authentication token. Here we should,
      * for example, change the user password with the new password */
-    std::clog << "Change auth hook" << std::endl;
+    // std::clog << "Change auth hook" << std::endl;
 
     return PAM_SUCCESS;
 }
-
 }
