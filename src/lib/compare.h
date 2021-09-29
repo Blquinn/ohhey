@@ -53,6 +53,11 @@ struct CliArgs {
                                                       "user");
         cmd.add(userArg);
 
+        TCLAP::ValueArg<std::string> deviceArg("D", "device",
+                                               "The camera device to use e.g. /dev/video0", false,
+                                               "/dev/video0", "path");
+        cmd.add(deviceArg);
+
         TCLAP::SwitchArg showImageWindowArg("S", "show-image-window",
                                             "Show a debug window for the camera image.", false);
         cmd.add(showImageWindowArg);
@@ -65,9 +70,11 @@ struct CliArgs {
         user = userArg.getValue();
         showImageWindow = showImageWindowArg.getValue();
         printTiming = printTimingArg.getValue();
+        device = deviceArg.getValue();
     }
 
     std::string user;
+    std::string device;
     bool showImageWindow;
     bool printTiming;
 };
@@ -203,15 +210,29 @@ struct DlibModels {
 struct CameraCaptureThread {
 public:
     // TODO: Figure out how to get higher res images.
-    CameraCaptureThread(int xres, int yres) : t(), m_frame(), cv(), mu(), captureThreadDie(false) {
+    CameraCaptureThread(const std::string &device, int xres, int yres)
+        : t(), m_frame(), cv(), mu(), m_frameDimensions(ImageDims{}), captureThreadDie(false) {
+
+        std::mutex dims_mu;
+        std::condition_variable dims_cv;
+
         t = std::thread([&]() {
-            Webcam webcam("/dev/video0", xres, yres);
+            Webcam webcam(device, xres, yres);
+            m_frameDimensions = webcam.get_frame_dimensions();
+
+            dims_cv.notify_one();
 
             while (!captureThreadDie.load()) {
                 m_frame = std::make_shared<Image>(webcam.frame());
                 cv.notify_one();
             }
         });
+
+        std::unique_lock<std::mutex> lk(dims_mu);
+        if (dims_cv.wait_for(lk, std::chrono::seconds(5)) == std::cv_status::timeout) {
+            shutdown();
+            throw std::runtime_error("Timed out while waiting for frame dimensions.");
+        }
     }
 
     ~CameraCaptureThread() { shutdown(); }
@@ -219,12 +240,13 @@ public:
     std::shared_ptr<Image> frame() {
         std::unique_lock<std::mutex> lk(mu);
         if (cv.wait_for(lk, std::chrono::seconds(5)) == std::cv_status::timeout) {
-            shutdown();
             throw std::runtime_error("Timed out while waiting for camera frame.");
         }
 
         return m_frame;
     }
+
+    ImageDims getFrameDimensions() { return m_frameDimensions; }
 
 private:
     void shutdown() {
@@ -236,6 +258,7 @@ private:
     std::shared_ptr<Image> m_frame;
     std::condition_variable cv;
     std::mutex mu;
+    ImageDims m_frameDimensions;
     std::atomic<bool> captureThreadDie;
 };
 
@@ -252,7 +275,7 @@ inline Result run(std::vector<std::string> argVec) {
 
         const int xres = 640;
         const int yres = 480;
-        CameraCaptureThread captureThread(xres, yres);
+        CameraCaptureThread captureThread(args.device, xres, yres);
 
         timer.mark("create capture thread");
 
@@ -272,7 +295,8 @@ inline Result run(std::vector<std::string> argVec) {
 
         timer.mark("load user face descriptor");
 
-        dlib::array2d<unsigned char> cameraImage(yres, xres);
+        auto frameDims = captureThread.getFrameDimensions();
+        dlib::array2d<unsigned char> cameraImage(frameDims.height, frameDims.width);
 
         std::unique_ptr<dlib::image_window> cameraImageWin;
 
@@ -310,7 +334,7 @@ inline Result run(std::vector<std::string> argVec) {
                 // TODO: Experiment with other values?
                 // TODO: Make configurable.
                 if (length(userFaceDescriptor - cfd) < 0.6) {
-                    // std::clog << "Found matching face in camera image." << std::endl;
+                    std::clog << "Found matching face in camera image." << std::endl;
                     return Result::AUTH_SUCCESS;
                 }
             }
