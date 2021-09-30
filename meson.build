@@ -12,7 +12,10 @@ if get_option('release')
 endif
 
 common_files = [
+  'src/cli/add.cpp',
   'src/lib/webcam-v4l2/webcam.cpp',
+  'src/lib/compare.cpp',
+  'src/lib/util.cpp',
 ]
 
 cli_files = common_files + [
