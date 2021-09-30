@@ -38,9 +38,12 @@ inline void run(std::vector<std::string> args) {
     const int xres = 640;
     const int yres = 480;
     // TODO: Discover devices.
-    Compare::CameraCaptureThread captureThread("/dev/video0", xres, yres);
+    // Compare::CameraCaptureThread captureThread("/dev/video0", xres, yres);
+    Compare::CameraCaptureThread captureThread("/dev/video2", xres, yres);
 
-    dlib::array2d<unsigned char> cameraImage(yres, xres);
+    auto dims = captureThread.getFrameDimensions();
+
+    dlib::array2d<unsigned char> cameraImage(dims.height, dims.width);
     auto cameraImageWin = std::make_unique<dlib::image_window>(cameraImage);
     cameraImageWin->set_title("Camera image.");
 
