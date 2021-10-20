@@ -1,6 +1,6 @@
 # ohhey
 
-## DISCLAIMER: This shit is almost certainly not secure at all, user at your own risk!!!
+## DISCLAIMER: This shit is almost certainly not secure at all, use at your own risk!!!
 
 But it is cool 😎 so you should totally try it out.
 
