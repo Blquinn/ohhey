@@ -1,10 +1,19 @@
 #include "add.h"
+#include <filesystem>
+#include <unistd.h>
 
 namespace Add {
 
 void printHelp() {
     std::cerr << helpMessage << std::endl;
     std::exit(1);
+}
+
+void checkIsRoot() {
+    if (getuid()) {
+        std::clog << "You need to be the root user to run add." << std::endl;
+        std::exit(2);
+    }
 }
 
 void run(std::vector<std::string> args) {
@@ -14,9 +23,11 @@ void run(std::vector<std::string> args) {
         printHelp();
     }
 
+    checkIsRoot();
+
     auto username = args[0];
 
-    auto modelsPath = std::filesystem::current_path().parent_path().append("dlib-data");
+    auto modelsPath = std::filesystem::path("/usr/local/share/ohhey");
     Compare::DlibModels models(modelsPath);
 
     const int xres = 640;
@@ -48,11 +59,10 @@ void run(std::vector<std::string> args) {
 
         auto face = dets[0];
 
-        std::stringstream path;
-        path << "/tmp/" << username << "-desc.dat";
+        Util::createDataDir();
 
         std::ofstream ofs;
-        ofs.open(path.str(), std::ofstream::out | std::ofstream::app);
+        ofs.open(Util::getFacePath(username), std::ofstream::out | std::ofstream::app);
         dlib::serialize(face, ofs);
 
         break;

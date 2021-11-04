@@ -1,8 +1,31 @@
 #include "compare.h"
 
+#include "src/lib/INIReader.h"
+
+#include <exception>
+#include <sstream>
+#include <stdexcept>
+
 namespace Compare {
 
-CliArgs::CliArgs(std::vector<std::string> &argVec) {
+const std::string defaultDevice = "/dev/video0";
+
+Config::Config() {
+    const std::string confPath = "/etc/ohhey/config.ini";
+
+    INIReader reader(confPath);
+    if (reader.ParseError() != 0) {
+        std::stringstream emsg;
+        emsg << "Failed to parse configuration, return code: " << reader.ParseError();
+        throw std::runtime_error(emsg.str());
+    }
+
+    device = reader.Get("video", "device_path", defaultDevice);
+    detectionTimeoutSeconds = reader.GetInteger("video", "timeout", 10);
+    verbose = reader.GetBoolean("core", "verbose", false);
+}
+
+void Config::parseCli(std::vector<std::string> &argVec) {
     TCLAP::CmdLine cmd("compare is resonsible for comparing the facial "
                        "image to the stored model.",
                        ' ', "0.1");
@@ -12,7 +35,7 @@ CliArgs::CliArgs(std::vector<std::string> &argVec) {
     cmd.add(userArg);
 
     TCLAP::ValueArg<std::string> deviceArg(
-        "D", "device", "The camera device to use e.g. /dev/video0", false, "/dev/video0", "path");
+        "D", "device", "The camera device to use e.g. /dev/video0", false, defaultDevice, "path");
     cmd.add(deviceArg);
 
     TCLAP::SwitchArg showImageWindowArg("S", "show-image-window",
@@ -22,12 +45,19 @@ CliArgs::CliArgs(std::vector<std::string> &argVec) {
     TCLAP::SwitchArg printTimingArg("T", "print-timing", "Print timing stats", false);
     cmd.add(printTimingArg);
 
+    TCLAP::SwitchArg verboseArg("v", "verbose", "Print verbose output.", false);
+    cmd.add(verboseArg);
+
     cmd.parse(argVec);
 
     user = userArg.getValue();
     showImageWindow = showImageWindowArg.getValue();
     printTiming = printTimingArg.getValue();
-    device = deviceArg.getValue();
+
+    if (deviceArg.isSet())
+        device = deviceArg.getValue();
+    if (verboseArg.isSet())
+        verbose = verboseArg.getValue();
 }
 
 std::vector<dlib::matrix<float, 0, 1>>
@@ -129,33 +159,26 @@ void CameraCaptureThread::shutdown() {
 
 Result run(std::vector<std::string> argVec) {
     try {
+        Config cnf;
+        cnf.parseCli(argVec);
 
-        CliArgs args(argVec);
-
-        // Config cnf;
-
-        Util::Timer timer("compare", args.printTiming);
+        Util::Timer timer("compare", cnf.printTiming);
 
         const int xres = 640;
         const int yres = 480;
 
-
-        CameraCaptureThread captureThread(args.device, xres, yres);
+        CameraCaptureThread captureThread(cnf.device, xres, yres);
 
         timer.mark("create capture thread");
 
         // TODO: Make configurable.
-        std::filesystem::path dlibDataPath("/home/ben/Code/cpp/ohhey/dlib-data");
-        DlibModels models(dlibDataPath, &timer);
+        DlibModels models(Util::DATA_DIR, &timer);
 
         timer.mark("load models");
 
-        std::stringstream path;
-        path << "/tmp/" << args.user << "-desc.dat";
-
         dlib::matrix<float, 0, 1> userFaceDescriptor;
         std::ifstream ifs;
-        ifs.open(path.str(), std::istream::in);
+        ifs.open(Util::getFacePath(cnf.user), std::istream::in);
         dlib::deserialize(ifs) >> userFaceDescriptor;
 
         timer.mark("load user face descriptor");
@@ -165,14 +188,14 @@ Result run(std::vector<std::string> argVec) {
 
         std::unique_ptr<dlib::image_window> cameraImageWin;
 
-        if (args.showImageWindow) {
+        if (cnf.showImageWindow) {
             cameraImageWin = std::make_unique<dlib::image_window>(cameraImage);
             cameraImageWin->set_title("Camera image.");
             timer.mark("launch camera image window");
         }
 
-        const auto deadline = std::chrono::system_clock::now() +
-                              std::chrono::seconds(10); // TODO: Make configurable timeout.
+        const auto deadline =
+            std::chrono::system_clock::now() + std::chrono::seconds(cnf.detectionTimeoutSeconds);
 
         int attempts = 1;
         bool passedDeadline = false;
@@ -182,15 +205,16 @@ Result run(std::vector<std::string> argVec) {
             auto currentFrame = captureThread.frame();
             copyFrameIntoArray2d(cameraImage, currentFrame->data.data());
 
-            if (args.showImageWindow)
+            if (cnf.showImageWindow)
                 cameraImageWin->set_image(cameraImage);
 
             auto cameraFaceDescriptors = models.getFaceDescriptorsFromImage(cameraImage);
 
             timer.mark("get camera face descriptors.");
 
-            // std::clog << "Found " << cameraFaceDescriptors.size() << " faces in camera image."
-            //           << std::endl;
+            if (cnf.verbose)
+                std::clog << "Found " << cameraFaceDescriptors.size() << " faces in camera image."
+                          << std::endl;
 
             // We can check to see if any face on the camera is similar to the users face.
             for (auto &&cfd : cameraFaceDescriptors) {
@@ -199,7 +223,8 @@ Result run(std::vector<std::string> argVec) {
                 // TODO: Experiment with other values?
                 // TODO: Make configurable.
                 if (length(userFaceDescriptor - cfd) < 0.6) {
-                    std::clog << "Found matching face in camera image." << std::endl;
+                    if (cnf.verbose)
+                        std::clog << "Found matching face in camera image." << std::endl;
                     return Result::AUTH_SUCCESS;
                 }
             }
@@ -208,8 +233,9 @@ Result run(std::vector<std::string> argVec) {
         }
 
         if (passedDeadline) {
-            std::clog << "Surpassed deadline while trying to detect matching face after "
-                      << attempts << " attempts." << std::endl;
+            if (cnf.verbose)
+                std::clog << "Surpassed deadline while trying to detect matching face after "
+                          << attempts << " attempts." << std::endl;
         }
 
         return Result::ERROR;

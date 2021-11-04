@@ -1,6 +1,7 @@
 #pragma once
 
 #include "chrono"
+#include "filesystem"
 #include "iostream"
 #include "string"
 #include "vector"
@@ -42,5 +43,19 @@ private:
     std::string name;
     bool m_shouldPrint;
 };
+
+// TODO: Review permissions of this directory.
+// TODO: Make configurable.
+static const std::string DATA_DIR = "/usr/local/share/ohhey";
+static const std::string FACES_DATA_DIR = DATA_DIR + "/faces";
+
+inline void createDataDir() {
+    std::filesystem::create_directories(DATA_DIR);
+    std::filesystem::create_directories(FACES_DATA_DIR);
+}
+
+inline std::string getFacePath(std::string user) {
+    return FACES_DATA_DIR + "/" + user + "-desc.dat";
+}
 
 } // namespace Util

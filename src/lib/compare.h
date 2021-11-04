@@ -43,31 +43,18 @@ static std::string facesDir = "/home/ben/Code/cpp/dlib/examples/faces";
 
 namespace Compare {
 
-struct CliArgs {
-    CliArgs(std::vector<std::string> &argVec);
+struct Config {
+    Config();
 
     std::string user;
     std::string device;
+    int detectionTimeoutSeconds;
     bool showImageWindow;
     bool printTiming;
+    bool verbose;
+
+    void parseCli(std::vector<std::string> &argVec);
 };
-
-// struct Config {
-//     Config() {
-//         // std::string file = "/etc/ohhey/config.ini";
-//         std::string file =
-//             std::filesystem::current_path().parent_path().append("etc").append("config.ini");
-
-//         INIReader reader(file);
-//         if (reader.ParseError() < 0) {
-//             throw "Failed to read config file.";
-//         }
-
-//         useCnn = reader.GetBoolean("core", "use_cnn", false);
-//     }
-
-//     bool useCnn;
-// };
 
 /////////////////////////////////
 // dlib templates (sourced from http://dlib.net/dnn_face_recognition_ex.cpp.html)
